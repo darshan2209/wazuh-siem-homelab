@@ -1,0 +1,16 @@
+# Never commit captured output from a real environment.
+*.log
+*-before.txt
+*-after.txt
+findings-*.txt
+iam-*.json
+lynis-*.txt
+evidence/
+screenshots/
+
+# Local Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
