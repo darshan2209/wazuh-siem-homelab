@@ -1,0 +1,5 @@
+# Test dependencies. Install into a venv, then: pytest
+pytest
+requests
+kafka-python-ng
+opensearch-py
