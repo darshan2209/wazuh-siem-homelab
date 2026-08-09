@@ -1,0 +1,130 @@
+# Detection stack: Wazuh (OpenSearch indexer) + Kafka + MISP.
+# Zeek runs natively on the VM, not here, because it needs the real interface.
+#
+# Run inside the Ubuntu VM:  docker compose up -d
+# First start takes ~5 min while the indexer initialises.
+#
+# Wazuh's indexer IS OpenSearch (Wazuh forked it). That is what makes the
+# OpenSearch claim on the CV accurate: you are operating an OpenSearch cluster.
+
+name: detection-stack
+
+services:
+
+  # ---------------------------------------------------------------- Kafka --
+  # KRaft mode, no ZooKeeper. Single broker is correct for a lab: the point is
+  # decoupling collection from indexing, which one broker demonstrates fine.
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      # 1 GB retention keeps the lab from filling the VM disk overnight.
+      KAFKA_CFG_LOG_RETENTION_BYTES: "1073741824"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ------------------------------------------------------- Wazuh indexer --
+  # This is the OpenSearch cluster.
+  wazuh-indexer:
+    image: wazuh/wazuh-indexer:4.9.0
+    container_name: wazuh-indexer
+    hostname: wazuh-indexer
+    ports:
+      - "9200:9200"
+    environment:
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      nofile: {soft: 65536, hard: 65536}
+    volumes:
+      - indexer_data:/var/lib/wazuh-indexer
+      - ./certs:/usr/share/wazuh-indexer/certs
+
+  # -------------------------------------------------------- Wazuh manager --
+  # Agents report here. Custom detection rules are mounted in read-only.
+  wazuh-manager:
+    image: wazuh/wazuh-manager:4.9.0
+    container_name: wazuh-manager
+    hostname: wazuh-manager
+    depends_on:
+      - wazuh-indexer
+    ports:
+      - "1514:1514"     # agent enrolment
+      - "1515:1515"     # agent registration
+      - "55000:55000"   # API
+    environment:
+      INDEXER_URL: "https://wazuh-indexer:9200"
+      INDEXER_USERNAME: "admin"
+      INDEXER_PASSWORD: "${INDEXER_PASSWORD:-SecretPassword1!}"
+    volumes:
+      - manager_data:/var/ossec/data
+      - ./detection-rules/local_rules.xml:/var/ossec/etc/rules/local_rules.xml:ro
+      - ./detection-rules/local_decoder.xml:/var/ossec/etc/decoders/local_decoder.xml:ro
+      # Zeek writes here from the host; the manager tails it.
+      - /opt/zeek/logs/current:/var/log/zeek:ro
+
+  # ------------------------------------------------------ Wazuh dashboard --
+  wazuh-dashboard:
+    image: wazuh/wazuh-dashboard:4.9.0
+    container_name: wazuh-dashboard
+    depends_on:
+      - wazuh-indexer
+    ports:
+      - "5601:443"
+    environment:
+      INDEXER_USERNAME: "admin"
+      INDEXER_PASSWORD: "${INDEXER_PASSWORD:-SecretPassword1!}"
+      WAZUH_API_URL: "https://wazuh-manager"
+
+  # ----------------------------------------------------------------- MISP --
+  # Threat-intelligence platform. scripts/misp_ingest.py pulls IoCs from here
+  # into the Wazuh CDB lists the detection rules match against.
+  misp:
+    image: ghcr.io/misp/misp-docker/misp-core:latest
+    container_name: misp
+    depends_on:
+      - misp-db
+    ports:
+      - "8443:443"
+    environment:
+      BASE_URL: "https://localhost:8443"
+      MYSQL_HOST: "misp-db"
+      MYSQL_USER: "misp"
+      MYSQL_PASSWORD: "${MISP_DB_PASSWORD:-misp}"
+      MYSQL_DATABASE: "misp"
+    volumes:
+      - misp_data:/var/www/MISP/app/files
+
+  misp-db:
+    image: mariadb:10.11
+    container_name: misp-db
+    environment:
+      MYSQL_USER: "misp"
+      MYSQL_PASSWORD: "${MISP_DB_PASSWORD:-misp}"
+      MYSQL_DATABASE: "misp"
+      MYSQL_ROOT_PASSWORD: "${MISP_DB_ROOT_PASSWORD:-misproot}"
+    volumes:
+      - misp_db:/var/lib/mysql
+
+volumes:
+  kafka_data:
+  indexer_data:
+  manager_data:
+  misp_data:
+  misp_db:
